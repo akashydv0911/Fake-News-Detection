@@ -1,7 +1,7 @@
 # Large data files
 test.csv
 train.csv
-cleaned_news.csv
+preprocessed_news.csv
 
 # Model files
 models/
