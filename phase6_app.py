@@ -217,7 +217,9 @@ if page == "🏠 Home & Predict":
     st.markdown('<div class="section-header">📝 Predict an Article</div>', unsafe_allow_html=True)
 
     if st.session_state.model is None:
-        st.warning("⚠️ Please upload CSV and click **Train Models** in the sidebar first.")
+        st.warning(
+        "⚠️ Please click 'Train Models' in the sidebar first."
+    )
     else:
         c1,c2 = st.columns(2)
         real_ex = "Scientists at NASA confirmed discovery of water ice on Moon's south pole, according to data published in Science journal."
