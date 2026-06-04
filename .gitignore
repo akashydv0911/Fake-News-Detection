@@ -1,0 +1,14 @@
+# Large data files
+Fake.csv
+True.csv
+cleaned_news.csv
+
+# Model files
+models/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
