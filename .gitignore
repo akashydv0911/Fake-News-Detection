@@ -1,6 +1,6 @@
 # Large data files
-Fake.csv
-True.csv
+test.csv
+train.csv
 cleaned_news.csv
 
 # Model files
