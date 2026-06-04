@@ -1,17 +1,8 @@
 # ============================================================
 #  FAKE NEWS DETECTION — PHASE 6: Streamlit Web App
+#  v2 — Works WITHOUT pre-uploaded CSV (has file uploader)
 # ============================================================
-#  Requirements:
-#    pip install streamlit scikit-learn joblib pandas numpy
-#    matplotlib seaborn wordcloud nltk
-#
-#  Run:
-#    streamlit run phase6_app.py
-#
-#  Needs in same folder:
-#    ├── models/best_model.pkl
-#    ├── models/tfidf_vectorizer.pkl
-#    └── cleaned_news.csv
+#  Run: streamlit run phase6_app.py
 # ============================================================
 
 import streamlit as st
@@ -19,14 +10,13 @@ import joblib
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-import matplotlib.gridspec as gridspec
 import seaborn as sns
 import re
 import os
+import io
 from collections import Counter
 from wordcloud import WordCloud
 
-# ── sklearn (for re-training if pkl missing) ─────────────────
 from sklearn.model_selection import train_test_split
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
@@ -39,9 +29,7 @@ from sklearn.metrics import (
     f1_score, confusion_matrix, classification_report
 )
 
-# ════════════════════════════════════════════════════════════
-#  PAGE CONFIG
-# ════════════════════════════════════════════════════════════
+# ── PAGE CONFIG ──────────────────────────────────────────────
 st.set_page_config(
     page_title="Fake News Detector",
     page_icon="🔍",
@@ -49,50 +37,28 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ── Custom CSS ───────────────────────────────────────────────
 st.markdown("""
 <style>
-  .main-title {
-    font-size: 2.4rem; font-weight: 700;
-    background: linear-gradient(90deg, #185FA5, #E24B4A);
-    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
-    margin-bottom: 0;
-  }
-  .subtitle { color: #666; font-size: 1rem; margin-top: 0; }
-  .fake-box {
-    background: #FCEBEB; border-left: 5px solid #E24B4A;
-    border-radius: 8px; padding: 1.2rem 1.5rem; margin-top: 1rem;
-  }
-  .real-box {
-    background: #EAF3DE; border-left: 5px solid #639922;
-    border-radius: 8px; padding: 1.2rem 1.5rem; margin-top: 1rem;
-  }
-  .metric-card {
-    background: #F7F9FC; border-radius: 10px;
-    padding: 1rem; text-align: center; border: 1px solid #E0E8F0;
-  }
-  .metric-num { font-size: 1.8rem; font-weight: 700; color: #185FA5; }
-  .metric-lbl { font-size: 0.8rem; color: #888; margin-top: 2px; }
-  .section-header {
-    font-size: 1.2rem; font-weight: 600; color: #185FA5;
-    border-bottom: 2px solid #185FA5; padding-bottom: 4px;
-    margin: 1.5rem 0 1rem;
-  }
-  .badge-fake {
-    background:#E24B4A; color:white; border-radius:20px;
-    padding:3px 12px; font-size:.85rem; font-weight:600;
-  }
-  .badge-real {
-    background:#639922; color:white; border-radius:20px;
-    padding:3px 12px; font-size:.85rem; font-weight:600;
-  }
+.main-title {
+    font-size:2.2rem; font-weight:700;
+    background:linear-gradient(90deg,#185FA5,#E24B4A);
+    -webkit-background-clip:text; -webkit-text-fill-color:transparent;
+}
+.fake-box { background:#FCEBEB; border-left:5px solid #E24B4A;
+    border-radius:8px; padding:1.2rem 1.5rem; margin-top:1rem; }
+.real-box { background:#EAF3DE; border-left:5px solid #639922;
+    border-radius:8px; padding:1.2rem 1.5rem; margin-top:1rem; }
+.metric-card { background:#1e1e2e; border-radius:10px;
+    padding:1rem; text-align:center; border:1px solid #333; }
+.metric-num { font-size:1.8rem; font-weight:700; color:#378ADD; }
+.metric-lbl { font-size:0.8rem; color:#888; margin-top:2px; }
+.section-header { font-size:1.1rem; font-weight:600; color:#378ADD;
+    border-bottom:2px solid #378ADD; padding-bottom:4px; margin:1.2rem 0 .8rem; }
 </style>
 """, unsafe_allow_html=True)
 
-# ════════════════════════════════════════════════════════════
-#  HELPERS
-# ════════════════════════════════════════════════════════════
-def clean_text(text: str) -> str:
+# ── HELPERS ──────────────────────────────────────────────────
+def clean_text(text):
     text = str(text).lower()
     text = re.sub(r"http\S+|www\S+", "", text)
     text = re.sub(r"<.*?>", "", text)
@@ -100,56 +66,36 @@ def clean_text(text: str) -> str:
     text = re.sub(r"\s+", " ", text).strip()
     return text
 
+# ── SESSION STATE: store trained model ───────────────────────
+if "model" not in st.session_state:
+    st.session_state.model = None
+if "tfidf" not in st.session_state:
+    st.session_state.tfidf = None
+if "df" not in st.session_state:
+    st.session_state.df = None
+if "results" not in st.session_state:
+    st.session_state.results = None
+if "trained_models" not in st.session_state:
+    st.session_state.trained_models = None
 
-@st.cache_resource(show_spinner="Loading model...")
-def load_model_and_vectorizer():
-    """Load saved model & TF-IDF, or retrain if files missing."""
-    pkl_model = "models/best_model.pkl"
-    pkl_tfidf = "models/tfidf_vectorizer.pkl"
+def load_df_from_path(path):
+    df = pd.read_csv(path).dropna(subset=["text","label"])
+    if "word_count" not in df.columns:
+        df["word_count"] = df["text"].apply(lambda x: len(str(x).split()))
+    return df
 
-    if os.path.exists(pkl_model) and os.path.exists(pkl_tfidf):
-        model = joblib.load(pkl_model)
-        tfidf = joblib.load(pkl_tfidf)
-        return model, tfidf, None   # no metrics on load
-
-    # ── Retrain from cleaned_news.csv ────────────────────────
-    if not os.path.exists("cleaned_news.csv"):
-        return None, None, None
-
-    df = pd.read_csv("cleaned_news.csv").dropna(subset=["text", "label"])
-    tfidf = TfidfVectorizer(max_features=5000, ngram_range=(1,2), stop_words="english")
-    X = tfidf.fit_transform(df["text"])
-    y = df["label"]
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42, stratify=y
-    )
-    model = LogisticRegression(max_iter=1000, random_state=42)
-    model.fit(X_train, y_train)
-    os.makedirs("models", exist_ok=True)
-    joblib.dump(model, pkl_model)
-    joblib.dump(tfidf, pkl_tfidf)
-    return model, tfidf, None
-
-
-@st.cache_data(show_spinner="Loading dataset...")
-def load_data():
+def try_load_csv():
+    """Try loading cleaned_news.csv from disk (works locally)."""
     if os.path.exists("cleaned_news.csv"):
-        return pd.read_csv("cleaned_news.csv").dropna(subset=["text","label"])
+        return load_df_from_path("cleaned_news.csv")
     return None
 
-
-@st.cache_data(show_spinner="Training all models for comparison...")
-def get_all_model_metrics():
-    df = load_data()
-    if df is None:
-        return None, None, None
-
+def train_all_models(df):
     tfidf = TfidfVectorizer(max_features=5000, ngram_range=(1,2), stop_words="english")
     X = tfidf.fit_transform(df["text"])
     y = df["label"]
     X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42, stratify=y
-    )
+        X, y, test_size=0.2, random_state=42, stratify=y)
 
     models = {
         "Logistic Regression": LogisticRegression(max_iter=1000, random_state=42),
@@ -158,7 +104,6 @@ def get_all_model_metrics():
         "Random Forest":       RandomForestClassifier(n_estimators=100, random_state=42, n_jobs=-1),
         "SVM":                 LinearSVC(random_state=42, max_iter=2000),
     }
-
     results, trained = {}, {}
     for name, m in models.items():
         m.fit(X_train, y_train)
@@ -171,422 +116,340 @@ def get_all_model_metrics():
             "CM":        confusion_matrix(y_test, y_pred),
         }
         trained[name] = m
-    return results, trained, tfidf
 
+    best_name = max(results, key=lambda x: results[x]["F1 Score"])
+    return tfidf, results, trained, trained[best_name], best_name
 
-def predict_article(text, model, tfidf):
+def predict_article(text):
     cleaned = clean_text(text)
-    vec     = tfidf.transform([cleaned])
-    pred    = model.predict(vec)[0]
-
-    # Confidence via decision_function or predict_proba
+    vec = st.session_state.tfidf.transform([cleaned])
+    pred = st.session_state.model.predict(vec)[0]
     try:
-        proba = model.predict_proba(vec)[0]
-        conf  = max(proba) * 100
-    except AttributeError:
+        proba = st.session_state.model.predict_proba(vec)[0]
+        conf = round(max(proba)*100, 1)
+    except:
         try:
-            df_val = model.decision_function(vec)[0]
-            conf   = min(99.9, 50 + abs(float(df_val)) * 8)
-        except Exception:
+            df_val = st.session_state.model.decision_function(vec)[0]
+            conf = round(min(99.9, 50+abs(float(df_val))*8), 1)
+        except:
             conf = 85.0
-    return int(pred), round(conf, 1)
+    return int(pred), conf
 
-
-# ════════════════════════════════════════════════════════════
-#  SIDEBAR
-# ════════════════════════════════════════════════════════════
+# ── SIDEBAR ──────────────────────────────────────────────────
 with st.sidebar:
-    st.image("https://img.icons8.com/fluency/96/news.png", width=64)
     st.markdown("## 🔍 Fake News Detector")
     st.markdown("---")
-    page = st.radio(
-        "Navigate",
-        ["🏠 Home & Predict", "📊 EDA & Insights", "🤖 Model Comparison",
-         "📈 Evaluation Metrics", "ℹ️ Project Summary"],
-        label_visibility="collapsed"
-    )
+    page = st.radio("Navigate", [
+        "🏠 Home & Predict",
+        "📊 EDA & Insights",
+        "🤖 Model Comparison",
+        "📈 Evaluation Metrics",
+        "ℹ️ Project Summary"
+    ], label_visibility="collapsed")
     st.markdown("---")
-    st.markdown("**Dataset**")
-    df_sidebar = load_data()
-    if df_sidebar is not None:
-        st.metric("Total Articles", f"{len(df_sidebar):,}")
-        fake_n = int((df_sidebar.label == 1).sum())
-        real_n = int((df_sidebar.label == 0).sum())
-        st.metric("Fake News",  f"{fake_n:,}")
-        st.metric("Real News",  f"{real_n:,}")
+
+    # ── DATA LOADER ─────────────────────────────────────────
+    st.markdown("**📁 Load Dataset**")
+
+    # Try auto-load from disk first
+    if st.session_state.df is None:
+        disk_df = try_load_csv()
+        if disk_df is not None:
+            st.session_state.df = disk_df
+
+    # File uploader as fallback
+    if st.session_state.df is None:
+        uploaded = st.file_uploader(
+            "Upload cleaned_news.csv",
+            type=["csv"],
+            help="Upload your cleaned_news.csv file"
+        )
+        if uploaded:
+            df_up = pd.read_csv(uploaded).dropna(subset=["text","label"])
+            if "word_count" not in df_up.columns:
+                df_up["word_count"] = df_up["text"].apply(lambda x: len(str(x).split()))
+            st.session_state.df = df_up
+            st.success("✅ Dataset loaded!")
+    else:
+        df = st.session_state.df
+        st.metric("Total Articles", f"{len(df):,}")
+        st.metric("Fake", f"{int((df.label==1).sum()):,}")
+        st.metric("Real", f"{int((df.label==0).sum()):,}")
+
+    # Train button
+    if st.session_state.df is not None and st.session_state.model is None:
+        if st.button("🚀 Train Models", type="primary", use_container_width=True):
+            with st.spinner("Training 5 models... (1-2 min)"):
+                tfidf, results, trained, best_model, best_name = train_all_models(st.session_state.df)
+                st.session_state.tfidf        = tfidf
+                st.session_state.results      = results
+                st.session_state.trained_models = trained
+                st.session_state.model        = best_model
+                st.session_state.best_name    = best_name
+            st.success(f"✅ Done! Best: {best_name}")
+            st.rerun()
+
+    if st.session_state.model is not None:
+        st.success(f"✅ Model ready!")
+        st.caption(f"Best: {st.session_state.get('best_name','')}")
+
     st.markdown("---")
     st.caption("Phase 6 · Fake News Detection · ML Project")
-
-
-# ════════════════════════════════════════════════════════════
-#  LOAD RESOURCES
-# ════════════════════════════════════════════════════════════
-model, tfidf_main, _ = load_model_and_vectorizer()
-df_main = load_data()
 
 # ════════════════════════════════════════════════════════════
 #  PAGE 1 — HOME & PREDICT
 # ════════════════════════════════════════════════════════════
 if page == "🏠 Home & Predict":
     st.markdown('<p class="main-title">🔍 Fake News Detection System</p>', unsafe_allow_html=True)
-    st.markdown('<p class="subtitle">End-to-end NLP · TF-IDF · 5 ML Models · Real-time Prediction</p>', unsafe_allow_html=True)
-
+    st.caption("End-to-end NLP · TF-IDF · 5 ML Models · Real-time Prediction")
     st.markdown("---")
 
-    # ── Quick stats ─────────────────────────────────────────
-    if df_main is not None:
-        c1, c2, c3, c4 = st.columns(4)
-        c1.markdown(f'<div class="metric-card"><div class="metric-num">{len(df_main):,}</div><div class="metric-lbl">Total Articles</div></div>', unsafe_allow_html=True)
-        c2.markdown(f'<div class="metric-card"><div class="metric-num">{int((df_main.label==1).sum()):,}</div><div class="metric-lbl">Fake Articles</div></div>', unsafe_allow_html=True)
-        c3.markdown(f'<div class="metric-card"><div class="metric-num">{int((df_main.label==0).sum()):,}</div><div class="metric-lbl">Real Articles</div></div>', unsafe_allow_html=True)
-        c4.markdown(f'<div class="metric-card"><div class="metric-num">5</div><div class="metric-lbl">ML Models Trained</div></div>', unsafe_allow_html=True)
+    if st.session_state.df is not None:
+        df = st.session_state.df
+        c1,c2,c3,c4 = st.columns(4)
+        c1.markdown(f'<div class="metric-card"><div class="metric-num">{len(df):,}</div><div class="metric-lbl">Total Articles</div></div>', unsafe_allow_html=True)
+        c2.markdown(f'<div class="metric-card"><div class="metric-num">{int((df.label==1).sum()):,}</div><div class="metric-lbl">Fake Articles</div></div>', unsafe_allow_html=True)
+        c3.markdown(f'<div class="metric-card"><div class="metric-num">{int((df.label==0).sum()):,}</div><div class="metric-lbl">Real Articles</div></div>', unsafe_allow_html=True)
+        c4.markdown(f'<div class="metric-card"><div class="metric-num">5</div><div class="metric-lbl">ML Models</div></div>', unsafe_allow_html=True)
+    else:
+        st.info("👈 Upload your **cleaned_news.csv** in the sidebar to get started.")
 
     st.markdown('<div class="section-header">📝 Predict an Article</div>', unsafe_allow_html=True)
 
-    if model is None or tfidf_main is None:
-        st.error("⚠️  Model not found. Make sure `models/best_model.pkl` exists or `cleaned_news.csv` is present for auto-retraining.")
+    if st.session_state.model is None:
+        st.warning("⚠️ Please upload CSV and click **Train Models** in the sidebar first.")
     else:
-        # ── Example buttons ─────────────────────────────────
-        st.markdown("**Try an example:**")
-        ex1, ex2, ex3 = st.columns(3)
-        examples = {
-            "🟢 Real example": "Scientists at NASA have confirmed the discovery of water ice on the Moon's south pole, according to data from the LCROSS mission published in Science journal.",
-            "🔴 Fake example": "BREAKING: Government secretly putting mind-control chemicals in tap water! Leaked documents expose the deep state conspiracy nobody wants you to see!",
-            "✏️ Custom": ""
-        }
-        chosen_example = ""
-        if ex1.button("🟢 Real example", use_container_width=True):
-            chosen_example = examples["🟢 Real example"]
-        if ex2.button("🔴 Fake example", use_container_width=True):
-            chosen_example = examples["🔴 Fake example"]
+        c1,c2 = st.columns(2)
+        real_ex = "Scientists at NASA confirmed discovery of water ice on Moon's south pole, according to data published in Science journal."
+        fake_ex = "SHOCKING: Government secretly controlling weather with 5G towers! Leaked documents expose the deep state conspiracy!"
+
+        if c1.button("🟢 Try Real Example", use_container_width=True):
+            st.session_state["example_text"] = real_ex
+        if c2.button("🔴 Try Fake Example", use_container_width=True):
+            st.session_state["example_text"] = fake_ex
 
         user_input = st.text_area(
             "Paste news article or headline:",
-            value=chosen_example,
-            height=160,
-            placeholder="Type or paste a news article here...",
+            value=st.session_state.get("example_text", ""),
+            height=150,
+            placeholder="Type or paste a news article here..."
         )
 
-        col_btn, col_clear = st.columns([1, 5])
-        analyze = col_btn.button("🔍 Analyze", type="primary", use_container_width=True)
+        if st.button("🔍 Analyze Article", type="primary"):
+            if user_input.strip():
+                with st.spinner("Analyzing..."):
+                    pred, conf = predict_article(user_input)
+                if pred == 1:
+                    st.markdown(f'<div class="fake-box"><h3>🔴 FAKE NEWS — Confidence: {conf}%</h3><p>Suspicious language patterns detected. Verify with trusted sources.</p></div>', unsafe_allow_html=True)
+                else:
+                    st.markdown(f'<div class="real-box"><h3>🟢 REAL NEWS — Confidence: {conf}%</h3><p>Language patterns consistent with factual reporting.</p></div>', unsafe_allow_html=True)
 
-        if analyze and user_input.strip():
-            with st.spinner("Analyzing..."):
-                pred, conf = predict_article(user_input, model, tfidf_main)
-
-            if pred == 1:
-                st.markdown(f"""
-                <div class="fake-box">
-                  <h3>🔴 &nbsp;<span class="badge-fake">FAKE NEWS</span></h3>
-                  <p style="margin-top:.6rem;font-size:1rem">
-                    This article shows patterns consistent with <strong>fake/unreliable news</strong>.
-                    <br>Confidence: <strong>{conf}%</strong>
-                  </p>
-                  <p style="color:#888;font-size:.85rem;margin-top:.5rem">
-                    ⚠️ Always verify with trusted sources before sharing.
-                  </p>
-                </div>""", unsafe_allow_html=True)
+                bar_color = "#E24B4A" if pred==1 else "#639922"
+                st.markdown(f"""<div style="background:#333;border-radius:8px;height:20px;overflow:hidden;margin-top:10px">
+                <div style="width:{conf}%;background:{bar_color};height:100%;border-radius:8px;
+                display:flex;align-items:center;justify-content:center;color:white;font-size:.8rem;font-weight:600">{conf}%</div></div>""", unsafe_allow_html=True)
             else:
-                st.markdown(f"""
-                <div class="real-box">
-                  <h3>🟢 &nbsp;<span class="badge-real">REAL NEWS</span></h3>
-                  <p style="margin-top:.6rem;font-size:1rem">
-                    This article shows patterns consistent with <strong>real/reliable news</strong>.
-                    <br>Confidence: <strong>{conf}%</strong>
-                  </p>
-                  <p style="color:#888;font-size:.85rem;margin-top:.5rem">
-                    ✅ Cross-check sources for full verification.
-                  </p>
-                </div>""", unsafe_allow_html=True)
-
-            # ── Confidence bar ───────────────────────────────
-            st.markdown("**Confidence Level**")
-            bar_color = "#E24B4A" if pred == 1 else "#639922"
-            st.markdown(f"""
-            <div style="background:#eee;border-radius:8px;height:18px;overflow:hidden;">
-              <div style="width:{conf}%;background:{bar_color};height:100%;border-radius:8px;
-                          display:flex;align-items:center;justify-content:center;
-                          color:white;font-size:.75rem;font-weight:600">{conf}%</div>
-            </div>""", unsafe_allow_html=True)
-
-            # ── Cleaned text preview ─────────────────────────
-            with st.expander("🔎 View cleaned text fed to model"):
-                st.code(clean_text(user_input), language=None)
-
-        elif analyze:
-            st.warning("Please enter some text to analyze.")
-
+                st.warning("Please enter some text.")
 
 # ════════════════════════════════════════════════════════════
-#  PAGE 2 — EDA & INSIGHTS
+#  PAGE 2 — EDA
 # ════════════════════════════════════════════════════════════
 elif page == "📊 EDA & Insights":
     st.markdown('<p class="main-title">📊 Exploratory Data Analysis</p>', unsafe_allow_html=True)
+    if st.session_state.df is None:
+        st.info("👈 Upload CSV in sidebar first."); st.stop()
 
-    if df_main is None:
-        st.error("cleaned_news.csv not found.")
-        st.stop()
+    df = st.session_state.df
+    fake_df = df[df.label==1]
+    real_df = df[df.label==0]
 
-    fake_df = df_main[df_main.label == 1]
-    real_df = df_main[df_main.label == 0]
-
-    # ── Distribution pie ─────────────────────────────────────
     st.markdown('<div class="section-header">1. Label Distribution</div>', unsafe_allow_html=True)
-    c1, c2 = st.columns([1, 1])
-
+    c1,c2 = st.columns(2)
     with c1:
-        fig, ax = plt.subplots(figsize=(5, 4))
-        sizes  = [len(fake_df), len(real_df)]
-        labels = [f"Fake\n{len(fake_df):,}", f"Real\n{len(real_df):,}"]
-        colors = ["#E24B4A", "#3B6D11"]
-        wedges, texts, autotexts = ax.pie(
-            sizes, labels=labels, autopct="%1.1f%%",
-            colors=colors, startangle=90,
-            wedgeprops={"edgecolor":"white","linewidth":2}
-        )
-        for at in autotexts:
-            at.set_fontsize(12); at.set_color("white"); at.set_fontweight("bold")
-        ax.set_title("Fake vs Real Distribution", fontweight="bold")
+        fig,ax = plt.subplots(figsize=(5,4))
+        ax.pie([len(fake_df),len(real_df)],
+               labels=[f"Fake\n{len(fake_df):,}",f"Real\n{real_df.__len__():,}"],
+               autopct="%1.1f%%", colors=["#E24B4A","#3B6D11"],
+               wedgeprops={"edgecolor":"white","linewidth":2}, startangle=90)
+        ax.set_title("Fake vs Real", fontweight="bold")
         st.pyplot(fig); plt.close()
-
     with c2:
-        fig, ax = plt.subplots(figsize=(5, 4))
-        ax.bar(["Fake", "Real"], [len(fake_df), len(real_df)],
-               color=["#E24B4A", "#3B6D11"], edgecolor="white", linewidth=0.8)
-        for i, v in enumerate([len(fake_df), len(real_df)]):
-            ax.text(i, v + 200, f"{v:,}", ha="center", fontweight="bold")
-        ax.set_title("Article Count by Label", fontweight="bold")
-        ax.set_ylabel("Count")
+        fig,ax = plt.subplots(figsize=(5,4))
+        ax.bar(["Fake","Real"],[len(fake_df),len(real_df)],
+               color=["#E24B4A","#3B6D11"],edgecolor="white")
+        for i,v in enumerate([len(fake_df),len(real_df)]):
+            ax.text(i,v+100,f"{v:,}",ha="center",fontweight="bold",color="white")
+        ax.set_facecolor("#1e1e2e"); fig.patch.set_facecolor("#1e1e2e")
+        ax.tick_params(colors="white"); ax.set_title("Article Count",fontweight="bold",color="white")
         st.pyplot(fig); plt.close()
 
-    # ── Word count distribution ──────────────────────────────
-    st.markdown('<div class="section-header">2. Article Length Analysis</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-header">2. Article Length</div>', unsafe_allow_html=True)
+    if "word_count" not in df.columns:
+        df["word_count"] = df["text"].apply(lambda x: len(str(x).split()))
+    fig,axes = plt.subplots(1,2,figsize=(12,4))
+    fig.patch.set_facecolor("#1e1e2e")
+    for ax,sub_df,color,label in zip(axes,[fake_df,real_df],["#E24B4A","#3B6D11"],["Fake","Real"]):
+        ax.hist(sub_df["word_count"].clip(upper=1500),bins=50,color=color,alpha=0.8,edgecolor="white")
+        ax.set_title(f"{label} News — Word Count",fontweight="bold",color="white")
+        ax.set_facecolor("#1e1e2e"); ax.tick_params(colors="white")
+    plt.tight_layout(); st.pyplot(fig); plt.close()
 
-    if "word_count" not in df_main.columns:
-        df_main["word_count"] = df_main["text"].apply(lambda x: len(str(x).split()))
+    c1,c2,c3 = st.columns(3)
+    c1.metric("Avg (Fake)",f"{fake_df['word_count'].mean():.0f} words")
+    c2.metric("Avg (Real)",f"{real_df['word_count'].mean():.0f} words")
+    c3.metric("Max",f"{df['word_count'].max():,} words")
 
-    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
-    axes[0].hist(fake_df["word_count"].clip(upper=1500), bins=50,
-                 color="#E24B4A", alpha=0.75, edgecolor="white")
-    axes[0].set_title("Fake News — Word Count", fontweight="bold")
-    axes[0].set_xlabel("Word Count"); axes[0].set_ylabel("Frequency")
+    st.markdown('<div class="section-header">3. Top Words & Word Clouds</div>', unsafe_allow_html=True)
+    stopwords_simple = {"the","a","an","and","or","but","in","on","at","to","for","of","with",
+                        "is","was","are","be","been","by","that","this","it","as","from","have",
+                        "had","has","his","her","their","he","she","they","we","you","i","not",
+                        "will","said","also","its","which","were","would","after","before","there",
+                        "can","all","about","when","who","if","one","two","new","more","also"}
 
-    axes[1].hist(real_df["word_count"].clip(upper=1500), bins=50,
-                 color="#3B6D11", alpha=0.75, edgecolor="white")
-    axes[1].set_title("Real News — Word Count", fontweight="bold")
-    axes[1].set_xlabel("Word Count"); axes[1].set_ylabel("Frequency")
-    plt.tight_layout()
-    st.pyplot(fig); plt.close()
-
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Avg word count (Fake)", f"{fake_df['word_count'].mean():.0f}")
-    c2.metric("Avg word count (Real)", f"{real_df['word_count'].mean():.0f}")
-    c3.metric("Max word count", f"{df_main['word_count'].max():,}")
-
-    # ── Top words ────────────────────────────────────────────
-    st.markdown('<div class="section-header">3. Most Common Words</div>', unsafe_allow_html=True)
-
-    stopwords_simple = set(["the","a","an","and","or","but","in","on","at","to",
-                             "for","of","with","is","was","are","be","been","by",
-                             "that","this","it","as","from","have","had","has","his",
-                             "her","their","he","she","they","we","you","i","not",
-                             "will","said","also","its","which","were","would","after",
-                             "before","there","can","all","about","when","who","if"])
-
-    def top_words(texts, n=15):
-        words = " ".join(texts).split()
-        words = [w for w in words if w not in stopwords_simple and len(w) > 2]
+    def top_words(texts,n=15):
+        words=" ".join(texts).split()
+        words=[w for w in words if w not in stopwords_simple and len(w)>2]
         return Counter(words).most_common(n)
 
-    c1, c2 = st.columns(2)
+    c1,c2 = st.columns(2)
     with c1:
-        tw_fake = top_words(fake_df["text"].fillna("").tolist())
-        fig, ax = plt.subplots(figsize=(6, 5))
-        ax.barh([w for w,_ in tw_fake[::-1]], [c for _,c in tw_fake[::-1]],
-                color="#E24B4A", alpha=0.85)
-        ax.set_title("Top 15 Words — Fake News", fontweight="bold", color="#E24B4A")
-        ax.set_xlabel("Frequency")
+        tw = top_words(fake_df["text"].fillna("").tolist())
+        fig,ax = plt.subplots(figsize=(6,5)); fig.patch.set_facecolor("#1e1e2e")
+        ax.barh([w for w,_ in tw[::-1]],[c for _,c in tw[::-1]],color="#E24B4A",alpha=0.85)
+        ax.set_title("Top Words — Fake",fontweight="bold",color="#E24B4A")
+        ax.set_facecolor("#1e1e2e"); ax.tick_params(colors="white")
+        plt.tight_layout(); st.pyplot(fig); plt.close()
+    with c2:
+        tw = top_words(real_df["text"].fillna("").tolist())
+        fig,ax = plt.subplots(figsize=(6,5)); fig.patch.set_facecolor("#1e1e2e")
+        ax.barh([w for w,_ in tw[::-1]],[c for _,c in tw[::-1]],color="#3B6D11",alpha=0.85)
+        ax.set_title("Top Words — Real",fontweight="bold",color="#3B6D11")
+        ax.set_facecolor("#1e1e2e"); ax.tick_params(colors="white")
         plt.tight_layout(); st.pyplot(fig); plt.close()
 
-    with c2:
-        tw_real = top_words(real_df["text"].fillna("").tolist())
-        fig, ax = plt.subplots(figsize=(6, 5))
-        ax.barh([w for w,_ in tw_real[::-1]], [c for _,c in tw_real[::-1]],
-                color="#3B6D11", alpha=0.85)
-        ax.set_title("Top 15 Words — Real News", fontweight="bold", color="#3B6D11")
-        ax.set_xlabel("Frequency")
-        plt.tight_layout(); st.pyplot(fig); plt.close()
-
-    # ── Word Clouds ──────────────────────────────────────────
-    st.markdown('<div class="section-header">4. Word Clouds</div>', unsafe_allow_html=True)
-    c1, c2 = st.columns(2)
-
+    c1,c2 = st.columns(2)
     with c1:
-        wc = WordCloud(width=700, height=350, background_color="white",
-                       colormap="Reds", max_words=100,
-                       stopwords=stopwords_simple).generate(
-            " ".join(fake_df["text"].fillna("").tolist())
-        )
-        fig, ax = plt.subplots(figsize=(7, 3.5))
-        ax.imshow(wc, interpolation="bilinear"); ax.axis("off")
-        ax.set_title("Fake News Word Cloud", fontweight="bold", color="#E24B4A")
+        wc = WordCloud(width=700,height=350,background_color="#1e1e2e",
+                       colormap="Reds",max_words=100,stopwords=stopwords_simple
+                       ).generate(" ".join(fake_df["text"].fillna("").tolist()))
+        fig,ax = plt.subplots(figsize=(7,3.5)); fig.patch.set_facecolor("#1e1e2e")
+        ax.imshow(wc,interpolation="bilinear"); ax.axis("off")
+        ax.set_title("Fake News Word Cloud",fontweight="bold",color="#E24B4A")
         st.pyplot(fig); plt.close()
-
     with c2:
-        wc = WordCloud(width=700, height=350, background_color="white",
-                       colormap="Greens", max_words=100,
-                       stopwords=stopwords_simple).generate(
-            " ".join(real_df["text"].fillna("").tolist())
-        )
-        fig, ax = plt.subplots(figsize=(7, 3.5))
-        ax.imshow(wc, interpolation="bilinear"); ax.axis("off")
-        ax.set_title("Real News Word Cloud", fontweight="bold", color="#3B6D11")
+        wc = WordCloud(width=700,height=350,background_color="#1e1e2e",
+                       colormap="Greens",max_words=100,stopwords=stopwords_simple
+                       ).generate(" ".join(real_df["text"].fillna("").tolist()))
+        fig,ax = plt.subplots(figsize=(7,3.5)); fig.patch.set_facecolor("#1e1e2e")
+        ax.imshow(wc,interpolation="bilinear"); ax.axis("off")
+        ax.set_title("Real News Word Cloud",fontweight="bold",color="#3B6D11")
         st.pyplot(fig); plt.close()
-
 
 # ════════════════════════════════════════════════════════════
 #  PAGE 3 — MODEL COMPARISON
 # ════════════════════════════════════════════════════════════
 elif page == "🤖 Model Comparison":
     st.markdown('<p class="main-title">🤖 Model Comparison</p>', unsafe_allow_html=True)
-    st.info("Training all 5 models — this may take 30–60 seconds on first load.", icon="⏳")
+    if st.session_state.results is None:
+        st.warning("👈 Upload CSV and click **Train Models** in sidebar first."); st.stop()
 
-    results, trained, tfidf_all = get_all_model_metrics()
+    results = st.session_state.results
+    MODEL_NAMES = list(results.keys())
+    SHORT_NAMES = ["LR","NB","DT","RF","SVM"]
+    best_name   = st.session_state.get("best_name","")
 
-    if results is None:
-        st.error("cleaned_news.csv not found.")
-        st.stop()
-
-    MODEL_NAMES  = list(results.keys())
-    SHORT_NAMES  = ["LR", "NB", "DT", "RF", "SVM"]
-
-    # ── Summary table ────────────────────────────────────────
+    metrics_df = pd.DataFrame({n:{k:v for k,v in r.items() if k!="CM"} for n,r in results.items()}).T
     st.markdown('<div class="section-header">Metrics Summary</div>', unsafe_allow_html=True)
-    metrics_df = pd.DataFrame({
-        name: {k: v for k, v in vals.items() if k not in ("CM",)}
-        for name, vals in results.items()
-    }).T
-    best_name = metrics_df["F1 Score"].idxmax()
-    st.dataframe(metrics_df.style.highlight_max(axis=0, color="#D4EDDA"), use_container_width=True)
-    st.success(f"🏆 Best Model: **{best_name}** with F1 = **{metrics_df.loc[best_name,'F1 Score']}%**")
+    st.dataframe(metrics_df.style.highlight_max(axis=0,color="#1a4a1a"), use_container_width=True)
+    st.success(f"🏆 Best Model: **{best_name}** — F1: **{metrics_df.loc[best_name,'F1 Score']}%**")
 
-    # ── Bar chart all metrics ─────────────────────────────────
     st.markdown('<div class="section-header">Metrics Bar Chart</div>', unsafe_allow_html=True)
-    metric_choice = st.selectbox("Select metric to visualize:", ["Accuracy","Precision","Recall","F1 Score"])
-    fig, ax = plt.subplots(figsize=(10, 4))
+    metric_choice = st.selectbox("Metric:", ["Accuracy","Precision","Recall","F1 Score"])
     vals   = [results[m][metric_choice] for m in MODEL_NAMES]
-    colors = ["#185FA5" if m != best_name else "#E24B4A" for m in MODEL_NAMES]
-    bars   = ax.bar(SHORT_NAMES, vals, color=colors, edgecolor="white", linewidth=0.8)
-    for bar, val in zip(bars, vals):
-        ax.text(bar.get_x()+bar.get_width()/2, bar.get_height()+0.15,
-                f"{val:.2f}%", ha="center", fontsize=10, fontweight="bold")
-    ax.set_ylim(min(vals)-5, 102)
-    ax.set_ylabel(f"{metric_choice} (%)")
-    ax.set_title(f"{metric_choice} Comparison — All Models", fontweight="bold")
-    ax.legend(handles=[
-        plt.Rectangle((0,0),1,1,color="#185FA5",label="Models"),
-        plt.Rectangle((0,0),1,1,color="#E24B4A",label=f"Best ({best_name})")
-    ])
+    colors = ["#E24B4A" if m==best_name else "#185FA5" for m in MODEL_NAMES]
+    fig,ax = plt.subplots(figsize=(10,4)); fig.patch.set_facecolor("#1e1e2e")
+    bars = ax.bar(SHORT_NAMES,vals,color=colors,edgecolor="white",linewidth=0.8)
+    for bar,val in zip(bars,vals):
+        ax.text(bar.get_x()+bar.get_width()/2,bar.get_height()+0.2,
+                f"{val:.1f}%",ha="center",fontsize=10,fontweight="bold",color="white")
+    ax.set_ylim(min(vals)-5,103); ax.set_ylabel(f"{metric_choice} (%)",color="white")
+    ax.set_title(f"{metric_choice} — All Models",fontweight="bold",color="white")
+    ax.set_facecolor("#1e1e2e"); ax.tick_params(colors="white")
     plt.tight_layout(); st.pyplot(fig); plt.close()
 
-    # ── Feature importance ───────────────────────────────────
-    st.markdown('<div class="section-header">Feature Importance (Logistic Regression)</div>', unsafe_allow_html=True)
-    lr_model     = trained["Logistic Regression"]
-    feature_names = np.array(tfidf_all.get_feature_names_out())
-    coefs         = lr_model.coef_[0]
-
-    top_fake_idx = np.argsort(coefs)[-20:][::-1]
-    top_real_idx = np.argsort(coefs)[:20]
-
-    c1, c2 = st.columns(2)
-    with c1:
-        fig, ax = plt.subplots(figsize=(6, 6))
-        ax.barh(feature_names[top_fake_idx], coefs[top_fake_idx],
-                color="#E24B4A", alpha=0.85)
-        ax.set_title("Top Words → FAKE", fontweight="bold", color="#E24B4A")
-        ax.set_xlabel("Coefficient"); ax.invert_yaxis()
-        plt.tight_layout(); st.pyplot(fig); plt.close()
-
-    with c2:
-        fig, ax = plt.subplots(figsize=(6, 6))
-        ax.barh(feature_names[top_real_idx], np.abs(coefs[top_real_idx]),
-                color="#3B6D11", alpha=0.85)
-        ax.set_title("Top Words → REAL", fontweight="bold", color="#3B6D11")
-        ax.set_xlabel("Coefficient (abs)"); ax.invert_yaxis()
-        plt.tight_layout(); st.pyplot(fig); plt.close()
-
+    if st.session_state.trained_models and st.session_state.tfidf:
+        st.markdown('<div class="section-header">Feature Importance (Logistic Regression)</div>', unsafe_allow_html=True)
+        lr = st.session_state.trained_models.get("Logistic Regression")
+        if lr:
+            feat_names = np.array(st.session_state.tfidf.get_feature_names_out())
+            coefs = lr.coef_[0]
+            top_f = np.argsort(coefs)[-20:][::-1]
+            top_r = np.argsort(coefs)[:20]
+            c1,c2 = st.columns(2)
+            with c1:
+                fig,ax = plt.subplots(figsize=(6,6)); fig.patch.set_facecolor("#1e1e2e")
+                ax.barh(feat_names[top_f],coefs[top_f],color="#E24B4A",alpha=0.85)
+                ax.set_title("Top Words → FAKE",fontweight="bold",color="#E24B4A")
+                ax.invert_yaxis(); ax.set_facecolor("#1e1e2e"); ax.tick_params(colors="white")
+                plt.tight_layout(); st.pyplot(fig); plt.close()
+            with c2:
+                fig,ax = plt.subplots(figsize=(6,6)); fig.patch.set_facecolor("#1e1e2e")
+                ax.barh(feat_names[top_r],np.abs(coefs[top_r]),color="#3B6D11",alpha=0.85)
+                ax.set_title("Top Words → REAL",fontweight="bold",color="#3B6D11")
+                ax.invert_yaxis(); ax.set_facecolor("#1e1e2e"); ax.tick_params(colors="white")
+                plt.tight_layout(); st.pyplot(fig); plt.close()
 
 # ════════════════════════════════════════════════════════════
 #  PAGE 4 — EVALUATION METRICS
 # ════════════════════════════════════════════════════════════
 elif page == "📈 Evaluation Metrics":
     st.markdown('<p class="main-title">📈 Evaluation Metrics</p>', unsafe_allow_html=True)
-    st.info("Training models for evaluation visuals...", icon="⏳")
+    if st.session_state.results is None:
+        st.warning("👈 Upload CSV and click **Train Models** in sidebar first."); st.stop()
 
-    results, trained, tfidf_all = get_all_model_metrics()
-    if results is None:
-        st.error("cleaned_news.csv not found.")
-        st.stop()
-
+    results     = st.session_state.results
     MODEL_NAMES = list(results.keys())
-    SHORT_NAMES = ["LR", "NB", "DT", "RF", "SVM"]
+    SHORT_NAMES = ["LR","NB","DT","RF","SVM"]
+    best_name   = st.session_state.get("best_name","")
 
-    # ── Confusion matrices ───────────────────────────────────
     st.markdown('<div class="section-header">Confusion Matrices — All Models</div>', unsafe_allow_html=True)
-    fig, axes = plt.subplots(1, 5, figsize=(22, 4))
-    cmaps     = ["Blues","Reds","Greens","Oranges","Purples"]
-    for ax, name, short, cmap in zip(axes, MODEL_NAMES, SHORT_NAMES, cmaps):
-        cm = results[name]["CM"]
-        sns.heatmap(cm, annot=True, fmt="d", cmap=cmap, ax=ax,
-                    xticklabels=["REAL","FAKE"], yticklabels=["REAL","FAKE"],
-                    linewidths=0.5, cbar=False, annot_kws={"size":12})
-        ax.set_title(short, fontweight="bold")
-        ax.set_xlabel("Predicted"); ax.set_ylabel("Actual")
+    fig,axes = plt.subplots(1,5,figsize=(22,4)); fig.patch.set_facecolor("#1e1e2e")
+    for ax,name,short,cmap in zip(axes,MODEL_NAMES,SHORT_NAMES,["Blues","Reds","Greens","Oranges","Purples"]):
+        sns.heatmap(results[name]["CM"],annot=True,fmt="d",cmap=cmap,ax=ax,
+                    xticklabels=["REAL","FAKE"],yticklabels=["REAL","FAKE"],
+                    linewidths=0.5,cbar=False,annot_kws={"size":12})
+        ax.set_title(short,fontweight="bold",color="white")
+        ax.set_facecolor("#1e1e2e"); ax.tick_params(colors="white")
     plt.tight_layout(); st.pyplot(fig); plt.close()
 
-    # ── Accuracy vs F1 grouped bar ───────────────────────────
     st.markdown('<div class="section-header">Accuracy vs F1 Score</div>', unsafe_allow_html=True)
-    fig, ax = plt.subplots(figsize=(11, 5))
     acc_v = [results[m]["Accuracy"]  for m in MODEL_NAMES]
     f1_v  = [results[m]["F1 Score"]  for m in MODEL_NAMES]
-    x     = np.arange(len(MODEL_NAMES)); w = 0.35
-    b1 = ax.bar(x-w/2, acc_v, w, label="Accuracy", color="#185FA5", alpha=0.85)
-    b2 = ax.bar(x+w/2, f1_v,  w, label="F1 Score",  color="#E24B4A", alpha=0.85)
-    for bars in [b1, b2]:
+    x = np.arange(len(MODEL_NAMES)); w=0.35
+    fig,ax = plt.subplots(figsize=(11,5)); fig.patch.set_facecolor("#1e1e2e")
+    b1=ax.bar(x-w/2,acc_v,w,label="Accuracy",color="#185FA5",alpha=0.85)
+    b2=ax.bar(x+w/2,f1_v, w,label="F1 Score", color="#E24B4A",alpha=0.85)
+    for bars in [b1,b2]:
         for bar in bars:
-            ax.text(bar.get_x()+bar.get_width()/2, bar.get_height()+0.2,
-                    f"{bar.get_height():.1f}%", ha="center", fontsize=8.5)
-    ax.set_xticks(x); ax.set_xticklabels(MODEL_NAMES, rotation=15, ha="right")
-    ax.set_ylim(min(acc_v+f1_v)-5, 103); ax.set_ylabel("Score (%)")
-    ax.set_title("Accuracy vs F1 Score — All Models", fontweight="bold"); ax.legend()
+            ax.text(bar.get_x()+bar.get_width()/2,bar.get_height()+0.2,
+                    f"{bar.get_height():.1f}%",ha="center",fontsize=8.5,color="white")
+    ax.set_xticks(x); ax.set_xticklabels(MODEL_NAMES,rotation=15,ha="right",color="white")
+    ax.set_ylim(min(acc_v+f1_v)-5,103); ax.set_facecolor("#1e1e2e")
+    ax.tick_params(colors="white"); ax.legend()
+    ax.set_title("Accuracy vs F1 — All Models",fontweight="bold",color="white")
     plt.tight_layout(); st.pyplot(fig); plt.close()
 
-    # ── Classification report (best model) ──────────────────
-    metrics_df  = pd.DataFrame({n:{k:v for k,v in r.items() if k!="CM"} for n,r in results.items()}).T
-    best_name   = metrics_df["F1 Score"].idxmax()
     st.markdown(f'<div class="section-header">Classification Report — {best_name}</div>', unsafe_allow_html=True)
-
-    if df_main is not None:
-        tfidf_r   = TfidfVectorizer(max_features=5000, ngram_range=(1,2), stop_words="english")
-        X_all     = tfidf_r.fit_transform(df_main["text"])
-        y_all     = df_main["label"]
-        _, X_test, _, y_test = train_test_split(X_all, y_all, test_size=0.2, random_state=42, stratify=y_all)
-        best_m    = trained[best_name]
-
-        try:
-            tfidf_b   = tfidf_all
-            X_test_b  = tfidf_b.transform(df_main["text"].iloc[int(len(df_main)*0.8):])
-            y_test_b  = y_all.iloc[int(len(df_main)*0.8):]
-            y_pred_b  = best_m.predict(X_test_b)
-        except Exception:
-            y_pred_b  = best_m.predict(X_test)
-            y_test_b  = y_test
-
-        report = classification_report(y_test_b, y_pred_b,
-                                       target_names=["REAL","FAKE"], output_dict=True)
-        report_df = pd.DataFrame(report).T.round(3)
-        st.dataframe(report_df, use_container_width=True)
-
+    best_m = st.session_state.trained_models[best_name]
+    tfidf  = st.session_state.tfidf
+    df     = st.session_state.df
+    X_all  = tfidf.transform(df["text"])
+    y_all  = df["label"]
+    split  = int(len(df)*0.8)
+    y_pred = best_m.predict(X_all[split:])
+    y_test = y_all.iloc[split:].values
+    report = classification_report(y_test,y_pred,target_names=["REAL","FAKE"],output_dict=True)
+    st.dataframe(pd.DataFrame(report).T.round(3),use_container_width=True)
 
 # ════════════════════════════════════════════════════════════
 #  PAGE 5 — PROJECT SUMMARY
@@ -594,61 +457,15 @@ elif page == "📈 Evaluation Metrics":
 elif page == "ℹ️ Project Summary":
     st.markdown('<p class="main-title">ℹ️ Project Summary</p>', unsafe_allow_html=True)
     st.markdown("---")
-
     sections = {
-        "🎯 Problem Statement": """
-Detect whether a given news article is **Fake** or **Real** using Natural Language Processing
-and supervised Machine Learning. Binary classification task: **1 = Fake**, **0 = Real**.
-        """,
-        "📦 Dataset Overview": """
-- **Source**: Kaggle — *Fake and Real News Dataset*
-- **Files**: `Fake.csv` + `True.csv`
-- **Size**: ~44,000 articles
-- **Features used**: `title` + `text` (combined into `content`)
-        """,
-        "🧹 Data Preprocessing": """
-1. Merged fake and real datasets, added labels
-2. Removed null values and duplicate rows
-3. Combined `title` + `text` into a single `content` column
-4. Lowercased all text, removed URLs, HTML tags, special characters
-5. Saved as `cleaned_news.csv`
-        """,
-        "🔬 Text Preprocessing & Feature Extraction": """
-- **Tokenization**: split text into tokens
-- **Stopword removal**: removed common English stopwords
-- **Punctuation removal**: regex-based cleaning
-- **TF-IDF Vectorizer**: `max_features=5000`, `ngram_range=(1,2)`, English stopwords
-        """,
-        "📊 EDA Findings": """
-- Dataset is roughly **balanced** (~50/50 fake vs real)
-- Fake news articles tend to use more **emotional, sensational** language
-- Real news articles use more **formal, factual** terminology
-- Average article length: ~800 words
-        """,
-        "🤖 Models Trained": """
-| Model | Typical Accuracy |
-|---|---|
-| Logistic Regression | ~98% |
-| Naive Bayes | ~94% |
-| Decision Tree | ~99% |
-| Random Forest | ~99% |
-| SVM (LinearSVC) | ~99% |
-        """,
-        "🏆 Conclusion": """
-- TF-IDF + traditional ML achieves **>98% accuracy** on this dataset
-- **Decision Tree / Random Forest / SVM** are top performers
-- Feature importance shows clear linguistic differences between fake and real news
-- Model saved as `models/best_model.pkl` for inference
-        """,
-        "🚀 Future Enhancements": """
-- Use **BERT / RoBERTa** transformer models for deeper semantic understanding
-- Add **source credibility** as a feature (domain, author)
-- Deploy as a **REST API** with FastAPI
-- Add **multilingual** fake news detection
-- Integrate **real-time news feed** for live detection
-        """,
+        "🎯 Problem Statement": "Detect whether a news article is **Fake** or **Real** using NLP and Machine Learning. Binary classification: **1 = Fake**, **0 = Real**.",
+        "📦 Dataset": "Kaggle — *Fake and Real News Dataset* (~44,000 articles). Features: `title` + `text` combined into `content`.",
+        "🧹 Preprocessing": "Merged datasets → removed nulls/duplicates → lowercased → removed URLs, HTML, special chars → saved as `cleaned_news.csv`.",
+        "🔬 Feature Extraction": "TF-IDF Vectorizer: `max_features=5000`, `ngram_range=(1,2)`, English stopwords removed.",
+        "🤖 Models Trained": "Logistic Regression · Naive Bayes · Decision Tree · Random Forest · SVM (LinearSVC)",
+        "🏆 Conclusion": "TF-IDF + ML achieves **>98% accuracy**. Decision Tree / RF / SVM are top performers. Clear linguistic patterns separate fake from real news.",
+        "🚀 Future Work": "BERT/RoBERTa transformers · Source credibility features · FastAPI REST endpoint · Multilingual detection · Live news feed integration.",
     }
-
     for title, content in sections.items():
         with st.expander(title, expanded=True):
             st.markdown(content)
