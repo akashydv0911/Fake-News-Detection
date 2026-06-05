@@ -44,10 +44,22 @@ st.markdown("""
     background:linear-gradient(90deg,#185FA5,#E24B4A);
     -webkit-background-clip:text; -webkit-text-fill-color:transparent;
 }
-.fake-box { background:#FCEBEB; border-left:5px solid #E24B4A;
-    border-radius:8px; padding:1.2rem 1.5rem; margin-top:1rem; }
-.real-box { background:#EAF3DE; border-left:5px solid #639922;
-    border-radius:8px; padding:1.2rem 1.5rem; margin-top:1rem; }
+.fake-box {
+    background:rgba(226,75,74,0.15);
+    border-left:5px solid #E24B4A;
+    border-radius:8px;
+    padding:1.2rem 1.5rem;
+    margin-top:1rem;
+    color:white;
+}
+.real-box {
+    background:rgba(76,175,80,0.15);
+    border-left:5px solid #4CAF50;
+    border-radius:8px;
+    padding:1.2rem 1.5rem;
+    margin-top:1rem;
+    color:white;
+}
 .metric-card { background:#1e1e2e; border-radius:10px;
     padding:1rem; text-align:center; border:1px solid #333; }
 .metric-num { font-size:1.8rem; font-weight:700; color:#378ADD; }
@@ -213,6 +225,9 @@ if page == "🏠 Home & Predict":
         c4.markdown(f'<div class="metric-card"><div class="metric-num">5</div><div class="metric-lbl">ML Models</div></div>', unsafe_allow_html=True)
     else:
         st.info("👈 Upload your **cleaned_news.csv** in the sidebar to get started.")
+        st.info(
+    f"🤖 Prediction generated using: {st.session_state.best_model_name}")
+        
 
     st.markdown('<div class="section-header">📝 Predict an Article</div>', unsafe_allow_html=True)
 
