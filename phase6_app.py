@@ -55,18 +55,25 @@ def clean_text(text):
     return text
 
 def load_data(source):
-    df_fake = pd.read_csv(fake_file); df_fake["label"] = 1
-    df_true = pd.read_csv(true_file); df_true["label"] = 0
-    df = pd.concat([df_fake, df_true], ignore_index=True)
+    if isinstance(source, str):          # news_small.csv auto-load path
+        df = pd.read_csv(source)
+    else:                                # manual upload (fake_file, true_file)
+        fake_file, true_file = source
+        df_fake = pd.read_csv(fake_file); df_fake["label"] = 1
+        df_true = pd.read_csv(true_file); df_true["label"] = 0
+        df = pd.concat([df_fake, df_true], ignore_index=True)
+
     df.dropna(inplace=True); df.drop_duplicates(inplace=True)
+
     if "title" in df.columns and "text" in df.columns:
         df["content"] = df["title"].fillna("") + " " + df["text"].fillna("")
     elif "text" in df.columns:
         df["content"] = df["text"].fillna("")
     else:
         df["content"] = df[df.select_dtypes("object").columns[0]].fillna("")
+
     df["content_clean"] = df["content"].apply(clean_text)
-    df["word_count"] = df["content_clean"].apply(lambda x: len(x.split()))
+    df["word_count"]    = df["content_clean"].apply(lambda x: len(x.split()))
     return df.sample(frac=1, random_state=42).reset_index(drop=True)
 
 @st.cache_resource
