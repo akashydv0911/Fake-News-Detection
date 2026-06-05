@@ -54,7 +54,7 @@ def clean_text(text):
     text = re.sub(r"\s+", " ", text).strip()
     return text
 
-def load_data(fake_file, true_file):
+def load_data(source):
     df_fake = pd.read_csv(fake_file); df_fake["label"] = 1
     df_true = pd.read_csv(true_file); df_true["label"] = 0
     df = pd.concat([df_fake, df_true], ignore_index=True)
@@ -180,24 +180,39 @@ for k in ["df","tfidf","results","trained","best_name"]:
 with st.sidebar:
     st.markdown("## 🔍 Fake News Detector")
     st.divider()
-    st.markdown("### 📂 Upload Dataset")
-    st.caption("Upload Fake.csv and True.csv from Kaggle")
-    fake_file = st.file_uploader("Fake.csv",  type=["csv"], key="fake")
-    true_file = st.file_uploader("True.csv",  type=["csv"], key="true")
+    import os
+    # Auto-load news_small.csv if present
+    if st.session_state.df is None and os.path.exists("news_small.csv"):
+        with st.spinner("Auto-loading dataset & training models..."):
+            try:
+                df = load_data("news_small.csv")
+                tfidf, results, trained, best_name = train_models(df)
+                st.session_state.update({"df":df,"tfidf":tfidf,"results":results,
+                                         "trained":trained,"best_name":best_name})
+            except Exception as e:
+                st.error(f"Auto-load error: {e}")
 
-    if fake_file and true_file:
-        if st.button("🚀 Train Models", type="primary", use_container_width=True):
-            with st.spinner("Training 5 models... (1-2 min)"):
-                try:
-                    df = load_data(fake_file, true_file)
-                    tfidf, results, trained, best_name = train_models(df)
-                    st.session_state.update({"df":df,"tfidf":tfidf,"results":results,
-                                             "trained":trained,"best_name":best_name})
-                    st.success("✅ Models ready!")
-                except Exception as e:
-                    st.error(f"Error: {e}")
+    st.markdown("### 📂 Dataset")
+    if st.session_state.df is not None:
+        st.success("✅ Dataset loaded automatically!")
     else:
-        st.info("👆 Upload both CSV files")
+        st.markdown("##### Manual Upload")
+        st.caption("Upload Fake.csv and True.csv from Kaggle")
+        fake_file = st.file_uploader("Fake.csv", type=["csv"], key="fake")
+        true_file = st.file_uploader("True.csv", type=["csv"], key="true")
+        if fake_file and true_file:
+            if st.button("🚀 Train Models", type="primary", use_container_width=True):
+                with st.spinner("Training 5 models... (1-2 min)"):
+                    try:
+                        df = load_data((fake_file, true_file))
+                        tfidf, results, trained, best_name = train_models(df)
+                        st.session_state.update({"df":df,"tfidf":tfidf,"results":results,
+                                                 "trained":trained,"best_name":best_name})
+                        st.success("✅ Models ready!")
+                    except Exception as e:
+                        st.error(f"Error: {e}")
+        else:
+            st.info("👆 Upload both CSV files")
 
     st.divider()
     if st.session_state.df is not None:
